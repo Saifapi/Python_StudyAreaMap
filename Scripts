@@ -1,1 +1,640 @@
+# f2efe6, e5efe6
+# 9ecfff, 73b2ff
 
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
+from cartopy.mpl.geoaxes import GeoAxes
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+import matplotlib.patches as mpatches
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+import numpy as np
+import matplotlib.ticker as mticker
+from cartopy.io.shapereader import Reader
+from cartopy.feature import ShapelyFeature
+from matplotlib import font_manager, rcParams
+from matplotlib.colors import LinearSegmentedColormap
+import matplotlib.cm as cm
+import numpy as np
+import geopandas as gpd
+import rasterio
+import os
+import pandas as pd
+from rasterio.warp import calculate_default_transform, reproject, Resampling
+import cartopy.io.shapereader as shpreader
+import geopandas as gpd
+from matplotlib.patches import ConnectionPatch
+
+output_dir = "G:/MATLAB & Julia/Plot"
+os.makedirs(output_dir, exist_ok=True)
+Name = "BOB"
+
+# CYCLONE_FILE = "/content/drive/My Drive/Study_Area_Files/cyclone_path_WRF.xlsx"
+
+BATHY1 = r"G:/MATLAB & Julia/ArcGis/Bathymetry/L_0.shp"
+BATHY2 = r"G:/MATLAB & Julia/ArcGis/Bathymetry/K_200.shp"
+BATHY3 = r"G:/MATLAB & Julia/ArcGis/Bathymetry/J_1000.shp"
+BATHY4 = r"G:/MATLAB & Julia/ArcGis/Bathymetry/I_2000.shp"
+BATHY5 = r"G:/MATLAB & Julia/ArcGis/Bathymetry/H_3000.shp"
+BATHY6 = r"G:/MATLAB & Julia/ArcGis/Bathymetry/G_4000.shp"
+
+BATHY_TIF = r"G:/MATLAB & Julia/ArcGis/Bathymetry/BoB_Andaman.tif"
+
+# plt.rcParams['font.family'] = 'Sans-Serif'
+font_path = "G:/MATLAB & Julia/Font/times-new-roman-grassetto.ttf"
+font_manager.fontManager.addfont(font_path)
+prop = font_manager.FontProperties(fname=font_path)
+rcParams['font.family'] = prop.get_name()
+rcParams['font.weight'] = 'bold'
+
+Main_extant = 'Bay of Bengal'
+Sub_extant = 'Bay of Bengal'
+# Study_Area = 'Meghna'
+
+# CSV_FILE = r"G:/MATLAB & Julia/Sampling sites.csv"
+BD_SHP = r"G:/MATLAB & Julia/ArcGis/shapefile/Bangladesh.shp" 
+bd_gdf = gpd.read_file(BD_SHP)
+
+# ensure CRS
+if bd_gdf.crs is None:
+    bd_gdf = bd_gdf.set_crs(epsg=4326)   # only if your shapefile is lon/lat but CRS missing
+bd_gdf = bd_gdf.to_crs(epsg=4326)        # convert to lon/lat for PlateCarree
+
+# ----------------- USER SETTINGS -----------------
+# Lon-Lat it should be from East to West and south to north, respectively
+MAIN_EXTENT = [95, 80, 16, 25]
+INSET_EXTENT = [70, 110, 0, 30]
+# BOX_EXTENT = [95, 80, 16, 24]
+
+def read_bathy_as_4326(tif_path):
+    with rasterio.open(tif_path) as src:
+        data = src.read(1, masked=True)
+
+        # If already EPSG:4326
+        if src.crs and src.crs.to_epsg() == 4326:
+            bounds = src.bounds
+            extent = [bounds.left, bounds.right, bounds.bottom, bounds.top]
+            return data, extent
+
+        # Otherwise: reproject to EPSG:4326
+        dst_crs = "EPSG:4326"
+        transform, width, height = calculate_default_transform(
+            src.crs, dst_crs, src.width, src.height, *src.bounds
+        )
+
+        dst = np.empty((height, width), dtype=np.float32)
+
+        reproject(
+            source=rasterio.band(src, 1),
+            destination=dst,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=transform,
+            dst_crs=dst_crs,
+            resampling=Resampling.bilinear
+        )
+
+        # Build extent from the new transform
+        left = transform.c
+        top = transform.f
+        right = left + transform.a * width
+        bottom = top + transform.e * height  # transform.e is negative typically
+
+        extent = [left, right, bottom, top]
+        return np.ma.masked_invalid(dst), extent
+
+def add_north_arrow(ax, x=0.95, y=0.90, size=0.15):
+    ax.annotate(
+        'N',
+        xy=(x, y), xytext=(x, y - size),
+        xycoords=ax.transAxes, textcoords=ax.transAxes,
+        ha='center', va='bottom', fontsize=22, zorder=15,
+        arrowprops=dict(arrowstyle='-|>,head_width=1.4,head_length=4',
+                        fc='k', ec='k')
+    )
+
+def add_scale_text(ax, main_extent, location=(0.97, 0.02), fontsize=24):
+    """
+    Add approximate 'Scale 1:n' text based on the horizontal extent
+    and the width of the map in the figure.
+
+    location : (x, y) in axes fraction coords (0–1).
+    """
+    fig = ax.figure
+    fig.canvas.draw()  # make sure layout is computed
+
+    # width of axes (map) in inches
+    bbox = ax.get_window_extent().transformed(fig.dpi_scale_trans.inverted())
+    width_in = bbox.width
+    width_m_on_paper = width_in * 0.0254  # inches -> metres
+
+    # ground width from extent (approx, at mid‑latitude)
+    lon_min, lon_max, lat_min, lat_max = main_extent
+    mid_lat = 0.5 * (lat_min + lat_max)
+    km_per_deg_lon = 111.32 * np.cos(np.deg2rad(mid_lat))
+    ground_km = (lon_max - lon_min) * km_per_deg_lon
+    ground_m = ground_km * 1000
+
+    # scale ratio (ground / map)
+    scale = ground_m / width_m_on_paper  # 1 : scale
+
+    # round to a nice number
+    exp = int(np.floor(np.log10(scale)))
+    nice = round(scale / 10**(exp-1)) * 10**(exp-1)
+
+    text = f"Scale 1:{int(nice):,}"
+
+    ax.text(location[0], location[1], text, transform=ax.transAxes, ha='right', va='bottom', fontsize=fontsize,
+            bbox=dict(facecolor='white', edgecolor='black', boxstyle='round,pad=0.2', alpha=1.0), zorder=15)
+
+SCALEBAR_FRACTION = 0.4   # 0.3 = very short, 0.6 = moderate, etc.
+SCALEBAR_SEGMENTS = 6
+
+def add_scalebar(ax, length_km, segments=4, location=(0.5, 0.5),
+                 linewidth=1.6, fontsize=18, crs=ccrs.PlateCarree()):
+    """Add horizontal scale bar fully inside current GeoAxes."""
+    # Convert axes-fraction location to lon/lat
+    disp = ax.transAxes.transform(location)
+    lon, lat = ax.transData.inverted().transform(disp)
+
+    # Convert km -> degrees of longitude at this latitude
+    km_per_deg_lon = 111.32 * np.cos(np.deg2rad(lat))
+    total_dlon = length_km / km_per_deg_lon
+
+    x0 = lon - total_dlon / 2
+    x1 = lon + total_dlon / 2
+    y = lat
+
+    # Vertical size for ticks / text
+    ext = ax.get_extent(crs)
+    height_deg = ext[3] - ext[2]
+    tick_dlat = 0.01 * height_deg
+    text_dlat = 0.02 * height_deg
+
+    # Main line
+    ax.plot([x0, x1], [y, y], transform=crs,
+            color='k', linewidth=linewidth, zorder=15)
+
+    # Segment ticks and labels
+    for i in range(segments + 1):
+        frac = i / segments
+        xi = x0 + frac * (x1 - x0)
+        ax.plot([xi, xi], [y - tick_dlat, y + tick_dlat],
+                transform=crs, color='k', linewidth=linewidth, zorder=15)
+        ax.text(xi, y - text_dlat, f"{int(frac * length_km)}", ha='center', va='top', 
+                color='k', fontsize=fontsize, transform=crs, zorder=15)
+
+    # Units label
+    ax.text(x1, y - 2 * text_dlat, "km", ha='left', va='top', color='k',
+            fontsize=22, transform=crs, zorder=15)
+
+# Shapefile path (optional)
+def add_shapefile(ax, shp_path, edgecolor="k", facecolor="none", linewidth=1.0,
+                  zorder=5, crs=ccrs.PlateCarree()):
+    gdf = gpd.read_file(shp_path)
+
+    # Ensure CRS exists; if your file is already lon/lat but CRS missing:
+    if gdf.crs is None:
+        gdf = gdf.set_crs(epsg=4326)
+
+    # Reproject to EPSG:4326 (PlateCarree expects lon/lat degrees)
+    gdf = gdf.to_crs(epsg=4326)
+
+    ax.add_geometries(
+        gdf.geometry,
+        crs=crs,
+        facecolor=facecolor,
+        edgecolor=edgecolor,
+        linewidth=linewidth,
+        zorder=zorder
+    )
+    return gdf
+
+# def add_colorbar_inside_map(fig, ax, mappable, rect_axfrac=(0.12, 0.06, 0.45, 0.018),
+#                             label="Depth (m)", labelsize=18, ticksize=14):
+#     """
+#     rect_axfrac = (x, y, w, h) in *axes-fraction* coordinates of the main map ax (0..1).
+#     Creates a real Matplotlib Axes in figure coordinates at that location.
+#     """
+#     fig.canvas.draw()  # make sure ax position is finalized
+
+#     pos = ax.get_position()  # in figure fraction
+#     x, y, w, h = rect_axfrac
+
+#     # convert from axes-fraction -> figure-fraction
+#     cax = fig.add_axes([
+#         pos.x0 + x * pos.width,
+#         pos.y0 + y * pos.height,
+#         w * pos.width,
+#         h * pos.height
+#     ])
+#     cax.set_zorder(15)
+#     cax.set_facecolor("black")
+#     cax.patch.set_alpha(0.35)
+
+#     cb = fig.colorbar(mappable, cax=cax, orientation="horizontal")
+#     cb.set_label(label, fontsize=labelsize, fontweight="bold", labelpad=6, color='white',)
+#     cb.ax.tick_params(labelsize=ticksize, labelcolor='white', axis='x', which='both', color='white')
+#     cb.outline.set_edgecolor('white')
+#     cb.outline.set_linewidth(1.2)
+
+#     # optional: label above the bar
+#     cb.ax.xaxis.set_label_position("top")
+
+#    return cb
+# ---------------- MAIN SCRIPT --------------------
+proj = ccrs.PlateCarree()
+fig = plt.figure(figsize=(24, 29), dpi=300)
+ax = plt.axes(projection=proj)
+ax.set_extent(MAIN_EXTENT, crs=proj)
+
+LAT_COL  = "Latitude"      # change to your exact column name
+LON_COL  = "Longitude"     # change to your exact column name
+SITE_COL = "Sampling sites"    # optional (only if you have it)
+
+# df = pd.read_csv(CSV_FILE)
+# df = df.copy()
+# df.columns = df.columns.str.strip()
+
+# If your CSV uses comma as decimal separator (e.g., 23,456), uncomment:
+# df[LAT_COL] = df[LAT_COL].astype(str).str.replace(",", ".", regex=False)
+# df[LON_COL] = df[LON_COL].astype(str).str.replace(",", ".", regex=False)
+
+# df[LAT_COL] = pd.to_numeric(df[LAT_COL], errors="coerce")
+# df[LON_COL] = pd.to_numeric(df[LON_COL], errors="coerce")
+# df = df.dropna(subset=[LAT_COL, LON_COL])
+
+# ax.scatter(
+#     df[LON_COL].values, df[LAT_COL].values,
+#     transform=proj,
+#     s=160,
+#     marker="o",
+#     facecolor="red",
+#     edgecolor="white",
+#     linewidth=1.0,
+#     zorder=20
+# )
+
+# # Optional labels from SITE_COL
+# if SITE_COL in df.columns:
+#     for lon, lat, site in zip(df[LON_COL], df[LAT_COL], df[SITE_COL]):
+#         ax.text(lon, lat, str(site),
+#                 transform=proj, fontsize=21, fontweight="bold",
+#                 ha="left", va="bottom", color="black", zorder=21)
+
+# Natural Earth features (10 m)
+land = cfeature.NaturalEarthFeature("physical", "land", "10m")
+coastline = cfeature.NaturalEarthFeature("physical", "coastline", "10m", facecolor="none")
+borders = cfeature.NaturalEarthFeature("cultural", "admin_0_boundary_lines_land", "10m", facecolor="none")
+lakes = cfeature.NaturalEarthFeature("physical", "lakes", "10m")
+rivers = cfeature.NaturalEarthFeature("physical", "rivers_lake_centerlines", "10m", facecolor="none")
+
+# Draw features
+ax.add_feature(land, facecolor="#e5efe6", edgecolor="black", linewidth=1,zorder=1)
+ax.add_feature(coastline, edgecolor="black", linewidth=1.4, zorder=2)
+ax.add_feature(borders, edgecolor="black", linewidth=1.6, zorder=3)
+ax.add_feature(lakes, facecolor="#9ec9ff", edgecolor="#4a7bb7", linewidth=0.8, zorder=4)
+ax.add_feature(rivers, edgecolor="#4a7bb7", linewidth=1, zorder=4)
+ax.set_facecolor("#73b2ff")
+
+# Gebco Bathymetry
+bathy, bathy_extent = read_bathy_as_4326(BATHY_TIF)
+
+def auto_vmin_vmax(arr, pmin=2, pmax=98):
+    # works for masked arrays too
+    vals = arr.compressed() if np.ma.isMaskedArray(arr) else arr.ravel()
+    vals = vals[np.isfinite(vals)]
+    return np.percentile(vals, pmin), np.percentile(vals, pmax)
+
+vmin, vmax = auto_vmin_vmax(bathy, 2, 98)
+
+def truncate_cmap(cmap, minval=0.25, maxval=1.0, n=256):
+    return LinearSegmentedColormap.from_list(
+        f"trunc_{cmap.name}", cmap(np.linspace(minval, maxval, n))
+    )
+
+cmap_dark = truncate_cmap(cm.Blues_r, -0.15, 1.0)   # increase 0.25 -> darker overall
+
+im = ax.imshow(
+    bathy,
+    extent=bathy_extent,
+    transform=ccrs.PlateCarree(),
+    origin="upper",
+    cmap=cmap_dark, # "Blues_r"
+    vmin=vmin , vmax=vmax,      # adjust to your data range
+    zorder=1
+)
+
+plt.tight_layout()   # if you keep it
+
+# Place bar inside map near other legends
+cb = add_colorbar_inside_map(
+    fig, ax, im,
+    rect_axfrac=(0.235, 0.13, 0.22, 0.018)  # (left, bottom, width, height) inside the MAP
+)
+
+# ---- MY SHAPEFILES (main map) ----
+add_shapefile(ax, BATHY1, edgecolor="#02246e", facecolor="none", linewidth=1.5, zorder=4) # 83bcff
+add_shapefile(ax, BATHY2, edgecolor="#023d93", facecolor="none", linewidth=1.5, zorder=5) # 4691ee
+add_shapefile(ax, BATHY3, edgecolor="#044bb7", facecolor="none", linewidth=1.5, zorder=6) # 0057dc
+add_shapefile(ax, BATHY4, edgecolor="#0057dc", facecolor="none", linewidth=1.5, zorder=7) # 044bb7
+add_shapefile(ax, BATHY5, edgecolor="#4691ee", facecolor="none", linewidth=1.5, zorder=8) # 023d93
+add_shapefile(ax, BATHY6, edgecolor="#83bcff", facecolor="none", linewidth=1.5, zorder=9)  # 02246e
+
+# Legend patch for Bathymetry
+Bathymetry_patches1 = Patch(facecolor="#83bcff", edgecolor="none", label=">0 m")
+Bathymetry_patches2 = Patch(facecolor="#4691ee", edgecolor="none", label=">200 m")
+Bathymetry_patches3 = Patch(facecolor="#0057dc", edgecolor="none", label=">1000 m")
+Bathymetry_patches4 = Patch(facecolor="#044bb7", edgecolor="none", label=">2000 m")
+Bathymetry_patches5 = Patch(facecolor="#023d93", edgecolor="none", label=">3000 m")
+Bathymetry_patches6 = Patch(facecolor="#02246e", edgecolor="none", label=">4000 m")
+
+# Legend line for Bathymetry
+Bathymetry_line1 = Line2D([0], [0], color="#02246e", lw=3, label=">0 m")
+Bathymetry_line2 = Line2D([0], [0], color="#023d93", lw=3, label=">200 m")
+Bathymetry_line3 = Line2D([0], [0], color="#044bb7", lw=3, label=">1000 m")
+Bathymetry_line4 = Line2D([0], [0], color="#0057dc", lw=3, label=">2000 m")
+Bathymetry_line5 = Line2D([0], [0], color="#4691ee", lw=3, label=">3000 m")
+Bathymetry_line6 = Line2D([0], [0], color="#83bcff", lw=3, label=">4000 m") # c6d6f8
+
+# Bathymetry legend
+legend3 = ax.legend(handles=[Bathymetry_patches1, Bathymetry_patches2, Bathymetry_patches3, Bathymetry_patches4, 
+                             Bathymetry_patches5, Bathymetry_patches6], loc='lower left', bbox_to_anchor=(0.12, .26), 
+                             frameon=True, ncol = 1, framealpha=1.0, edgecolor="black", fontsize=20, borderpad=0.6)
+legend3 = ax.legend(handles=[Bathymetry_line1, Bathymetry_line2, Bathymetry_line3, Bathymetry_line4, 
+                             Bathymetry_line5, Bathymetry_line6], loc='lower left', bbox_to_anchor=(0.12, .26), 
+                             frameon=True, ncol = 1, framealpha=1.0, edgecolor="black", fontsize=20, borderpad=0.6)
+legend3.set_zorder(15)
+ax.add_artist(legend3)
+
+# Optional: Add subdivision borders (e.g., states/provinces)
+try:
+    admin1 = cfeature.NaturalEarthFeature(category='cultural', name='admin_1_states_provinces_lines', scale='10m', facecolor='none')
+    ax.add_feature(admin1, edgecolor='gray', linewidth=1, zorder=3)
+except:
+    print("Subdivision borders not available for this region.")
+
+# Path to your Area shapefile (change to your file)
+# Area_SHP = "/content/drive/My Drive/Shapefiles/BD-Districts/BGD_adm2.shp"
+# try:
+#     reader = Reader(Area_SHP)
+#     Area_feature = ShapelyFeature(list(reader.geometries()), proj, facecolor='#e5efe6') # same CRS as your map (PlateCarree)
+#     ax.add_feature(Area_feature, edgecolor='black', linewidth=0.6, zorder=4)
+# except Exception as e:
+#     print("Could not load shapefile:", e)
+
+# Frame
+ax.spines['geo'].set_edgecolor("black")
+ax.spines['geo'].set_linewidth(1.0)
+
+# Ticks and labels
+lon_min, lon_max, lat_min, lat_max = MAIN_EXTENT # Define lon_min, lon_max, lat_min, lat_max here
+lon_center = 0.5 * (lon_min + lon_max)
+lat_center = 0.5 * (lat_min + lat_max)
+
+X_INTERVAL = 0.15
+Y_INTERVAL = 0.15
+
+x_ticks = np.arange(lon_center - 1000 * X_INTERVAL, lon_center + 1000 * X_INTERVAL, X_INTERVAL)
+x_ticks = x_ticks[(x_ticks >= lon_min) & (x_ticks <= lon_max)]
+
+y_ticks = np.arange(lat_center - 1000 * Y_INTERVAL, lat_center + 1000 * Y_INTERVAL, Y_INTERVAL)
+y_ticks = y_ticks[(y_ticks >= lat_min) & (y_ticks <= lat_max)]
+
+X_TICK_INT = 4    # longitude interval
+Y_TICK_INT = 4    # latitude interval
+
+lon_min2, lon_max2, lat_min2, lat_max2 = INSET_EXTENT
+
+lon_min, lon_max, lat_min, lat_max = MAIN_EXTENT
+x_ticks = np.arange(lon_min, lon_max + 1e-9, X_TICK_INT)
+y_ticks = np.arange(lat_min, lat_max + 1e-9, Y_TICK_INT)
+
+ax.set_xticks(x_ticks, crs=proj)
+ax.set_yticks(y_ticks, crs=proj)
+
+lon_formatter = LongitudeFormatter(number_format=".2f", degree_symbol="°", direction_label=True)
+lat_formatter = LatitudeFormatter(number_format=".2f", degree_symbol="°", direction_label=True)
+
+ax.xaxis.set_major_formatter(lon_formatter)
+ax.yaxis.set_major_formatter(lat_formatter)
+ax.tick_params(labelsize=22)
+ax.xaxis.set_ticks_position("both")
+ax.yaxis.set_ticks_position("both")
+
+# Show tick labels on all four sides of the grid
+ax.tick_params(axis='x', which='both', top=True, bottom=True, labeltop=True, labelbottom=True)
+ax.tick_params(axis='y', which='both', right=True, left=True, labelleft=True, labelright=True) #, labelrotation=90)
+
+# Grid lines at the same positions as ticks
+gl = ax.gridlines(crs=proj, draw_labels=False, linewidth=0.8, color='gray', alpha=0.6, linestyle='--')
+gl.xlocator = mticker.FixedLocator(x_ticks)
+gl.ylocator = mticker.FixedLocator(y_ticks)
+
+# Example data points
+# data_lons = [91.425, 91.675]
+# data_lats = [22.525, 21.425]
+
+# ax.scatter(data_lons, data_lats, transform=proj, s=120, marker='o', facecolor='black', edgecolor='black', zorder=5)
+
+# for lon, lat in zip(data_lons, data_lats):
+#     ax.annotate(
+#         f"{lat:.0f}°N, {lon:.0f}°E", xy=(lon, lat), xycoords=proj, xytext=(0, -10),
+#         textcoords='offset points', ha='center', va='top', fontsize=8, clip_on=True)
+
+# place_names = ["Northwest\nSandwip", "Near-shore of\nMaheshkhali"]
+
+# for lon, lat, name in zip(data_lons, data_lats, place_names):
+#     ax.annotate(
+#         name, xy=(lon, lat), xycoords=proj, xytext=(8, -60), textcoords='offset points',
+#         ha='center', va='bottom', fontsize=25, color='black', clip_on=True, zorder=5)
+
+# # Cyclone paths
+# CYCLONE_SHEETS = [
+#     "Mocha", "Hamoon", "Midhili"
+# ]
+
+## sheet_to_plot = "Mocha"
+
+# PLOT ONE CYCLONE PATH
+# df = pd.read_excel(CYCLONE_FILE, sheet_name=sheet_to_plot)
+# lons = df["LON"].values
+# lats = df["LAT"].values
+
+# ax.plot(lons, lats,transform=proj,color="yellow",linewidth=1.5,label=sheet_to_plot,zorder=6)
+
+# ax.scatter(lons[0], lats[0], transform=proj, s=25,
+#            facecolor="white", edgecolor="black", zorder=7)
+# ax.scatter(lons[-1], lats[-1], transform=proj, s=25,
+#            facecolor="black", edgecolor="black", zorder=7)
+
+# Legend entry for this cyclone
+# cyclone_handle = Line2D([], [], color="yellow", linewidth=1.5, label="Cyclone Track")
+# legend_cyc = ax.legend([cyclone_handle], ["Cyclone Track"], loc="lower left", bbox_to_anchor=(0.14, .05),
+#             frameon=True, framealpha=1.0, edgecolor="black", fontsize=8, borderpad=0.6)
+# ax.add_artist(legend_cyc)
+
+# # PLOT ALL CYCLONE PATHS
+# colors = ["red", "green", "black"]
+
+# cyclone_handles = []
+
+# for sheet_name, color in zip(CYCLONE_SHEETS, colors):
+#     df = pd.read_excel(CYCLONE_FILE, sheet_name=sheet_name)
+#     lons = df["LON"].values
+#     lats = df["LAT"].values
+#     ax.plot(lons, lats, transform=proj, color=color, linewidth=3, zorder=6)
+#     ax.scatter(lons[0], lats[0], transform=proj, s=50,
+#                facecolor="white", edgecolor="black", zorder=7)
+#     ax.scatter(lons[-1], lats[-1], transform=proj, s=50,
+#                facecolor="black", edgecolor="black", zorder=7)
+#     cyclone_handles.append(
+#         Line2D([], [], color=color, linewidth=3, label=sheet_name)
+#     )
+
+# # Legend for all cyclones
+# legend_cyc = ax.legend(handles=cyclone_handles, loc="lower left", bbox_to_anchor=(0.12, .22), frameon=True,
+#     framealpha=1.0, edgecolor="black", fontsize=28, borderpad=0.6, title="Cyclone Tracks")
+# legend_cyc.get_title().set_fontsize(32)
+# ax.add_artist(legend_cyc)
+
+# Central label
+ax.text((lon_min + lon_max) / 2, (lat_min + lat_max) / 2 + 1.5, f"{Main_extant}", transform=proj, fontsize=40,
+        fontweight='bold', ha='center', va='center', color='White', clip_on=True, zorder=15)
+
+# Country labels (all inside frame)
+ax.text(91.87, 22.28, "Karnaphuli River", transform=proj, fontsize=42, clip_on=True, weight="bold", zorder=5, rotation=50)
+ax.text(91.87, 22.5, "Chittagong", transform=proj, fontsize=50, clip_on=True, weight="bold", zorder=5)
+ax.text(95, 21.5, "Myanmar", transform=proj, fontsize=32, clip_on=True, weight="bold", zorder=5)
+ax.text(79.9, 7.5, "Sri Lanka", transform=proj, fontsize=32, clip_on=True, weight="bold", zorder=5)
+
+# North arrow
+add_north_arrow(ax)
+
+# Scale bar (inside frame, now auto‑derived from extent)
+center_lat = (lat_min + lat_max) / 2.0
+km_per_deg_lon_center = 111.32 * np.cos(np.deg2rad(center_lat))
+
+map_width_deg = lon_max - lon_min
+map_width_km  = map_width_deg * km_per_deg_lon_center
+
+SCALEBAR_LENGTH_KM = map_width_km * SCALEBAR_FRACTION
+SCALEBAR_LENGTH_KM = round(SCALEBAR_LENGTH_KM / 10) * 10
+
+add_scalebar(ax, SCALEBAR_LENGTH_KM, segments=SCALEBAR_SEGMENTS, location=(0.5, 0.065), crs=proj)
+
+#Scale Text
+add_scale_text(ax, MAIN_EXTENT, location=(0.15, 0.27), fontsize=30)
+
+# Legend: Data points (inside frame, lower left)
+# point_handle = Line2D([], [], marker='o', linestyle='None', markersize=6, markerfacecolor='Black', markeredgecolor='black')
+# legend1 = ax.legend([point_handle], ["Data Extraction Points"], loc="lower left", bbox_to_anchor=(0.08, .0025), frameon=True,
+#                     framealpha=1.0, edgecolor="black", fontsize=8, borderpad=0.6)
+# ax.add_artist(legend1)
+
+# Legend: Land / Water / Rivers (inside frame, lower center)
+land_patch = Patch(facecolor="#e5efe6", edgecolor="black", label="Land")
+water_patch = Patch(facecolor="#73b2ff", edgecolor="black", label="Wetlands")
+river_line = Line2D([], [], color="#4a7bb7", linewidth=1.2, label="Rivers")
+border_patch = Line2D([], [], color="black", linewidth=2, label="International Boundary")
+Site_patch = Line2D([], [], marker='o', linestyle='None', markersize=12, markerfacecolor='red', markeredgecolor='white', label="Sampling Sites")
+
+legend2 = ax.legend(handles=[land_patch, water_patch, river_line, border_patch, Site_patch], loc='lower left', bbox_to_anchor=(0.02, .15),
+                    frameon=True, ncol = 2, framealpha=1.0, edgecolor="black", fontsize=30, borderpad=0.6)
+legend2.set_zorder(15)
+ax.add_artist(legend2)
+
+# rectangle inside the main map showing custom lat/lon
+box_lon_min, box_lon_max, box_lat_min, box_lat_max = BOX_EXTENT
+
+box_rect = mpatches.Rectangle((box_lon_min, box_lat_min), box_lon_max - box_lon_min, box_lat_max - box_lat_min,
+                              transform=proj, fill=False, edgecolor="red", linewidth=1.5, linestyle="-", zorder=6)
+ax.add_patch(box_rect)
+
+# Legend for inner rectangle (custom box)
+box_patch = Patch(facecolor='none', edgecolor='red', linewidth=1.5, linestyle='-', label= f'{Study_Area}')
+
+legend_box = ax.legend(handles=[box_patch], loc='lower left', bbox_to_anchor=(0.1, 0.03),
+                       frameon=True, framealpha=1.0, edgecolor="black", fontsize=8, borderpad=0.6)
+ax.add_artist(legend_box)
+
+# Inset map INSIDE main axes
+INSET_POS = [0.02, 0.67, 0.30, 0.30]
+inset_ax = ax.inset_axes(INSET_POS, transform=ax.transAxes, projection=proj)
+inset_ax.set_extent(INSET_EXTENT, crs=proj)
+
+inset_ax.add_feature(land, facecolor="#e5efe6", edgecolor="0.6",linewidth=0.6)
+inset_ax.add_geometries(
+    bd_gdf.geometry,
+    crs=proj,                      # PlateCarree
+    facecolor="orange",            # highlight color
+    edgecolor="black",
+    linewidth=1.2,
+    zorder=10
+)
+inset_ax.add_feature(coastline, edgecolor="0.4",linewidth=0.8, zorder=12)
+inset_ax.add_feature(borders, edgecolor="0.4", linewidth=1.2, zorder=11)
+inset_ax.add_feature(lakes, facecolor="#9ec9ff", edgecolor="#4a7bb7", linewidth=0.8, zorder=13)
+inset_ax.add_feature(rivers, edgecolor="#4a7bb7", linewidth=0.3, zorder=13)
+# Optional: Add subdivision borders (e.g., states/provinces)
+try:
+    admin1 = cfeature.NaturalEarthFeature(category='cultural', name='admin_1_states_provinces_lines', scale='10m', facecolor='none')
+    inset_ax.add_feature(admin1, edgecolor='gray', linewidth=1, zorder=3)
+except:
+    print("Subdivision borders not available for this region.")
+inset_ax.text((lon_min2 + lon_max2) / 2 + 5, (lat_min2 + lat_max2) / 2 + 26, f"{Main_extant}", transform=proj, fontsize=13,
+        fontweight='bold', ha='center', va='center', color='navy', clip_on=True)
+
+inset_ax.text((lon_min2 + lon_max2) / 2, (lat_min2 + lat_max2) / 2 - 3, f"{Sub_extant}", transform=proj, fontsize=26,
+        fontweight='bold', ha='center', va='center', color='navy', clip_on=True)
+
+inset_ax.set_facecolor("#73b2ff")
+
+# Rectangle showing main extent
+rect = mpatches.Rectangle((lon_min, lat_min), lon_max - lon_min, lat_max - lat_min,
+                          transform=proj, fill=False, edgecolor="black", linewidth=2.4, zorder=15)
+inset_ax.add_patch(rect)
+
+inset_ax.set_xticks([])
+inset_ax.set_yticks([])
+inset_ax.spines['geo'].set_edgecolor("black")
+inset_ax.spines['geo'].set_linewidth(1.6)
+inset_ax.set_xticks([])
+inset_ax.set_yticks([])
+inset_ax.spines['geo'].set_edgecolor("black")
+inset_ax.spines['geo'].set_linewidth(1.6)
+
+fig.suptitle(f'{Name}', fontsize=40, fontweight="bold", y=0.93)
+
+
+# --- Arrow from inset box -> stations (main map) ---
+fig.canvas.draw()  # important: ensure transforms are ready
+
+# point on the inset box (choose center of your MAIN_EXTENT box)
+box_lon = lon_max
+box_lat = lat_min
+
+# station target point (use centroid of your CSV points)
+st_lon = 91.81
+st_lat = 22.33
+
+arrow = ConnectionPatch(
+    xyA=(box_lon, box_lat), coordsA=inset_ax.transData,  # start in inset
+    xyB=(st_lon, st_lat),   coordsB=ax.transData,        # end in main map
+    arrowstyle="-|>", lw=4, color="black",
+    mutation_scale=30,
+    connectionstyle="arc3,rad=0"  # curve; change rad to 0 for straight
+)
+arrow.set_zorder(50)
+arrow.set_clip_on(False)   # don't clip at axes border
+fig.add_artist(arrow)
+
+save_path = os.path.join(output_dir, f"{Name}.png")
+plt.tight_layout()
+
+plt.savefig(save_path, dpi=300, bbox_inches="tight")
+print(f"Saved figure to: {output_dir}")
+
+plt.show()
